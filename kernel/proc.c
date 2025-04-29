@@ -71,7 +71,7 @@ fcfs_enqueue(struct proc *p)
   fcfs_queue.size++;
   release(&fcfs_queue_lock);
 
-  printf("Equeued PID %d (level=%d, priority=%d, state=%d)\n", p->pid, p->level, p->priority, p->state);
+  // printf("Equeued PID %d (level=%d, priority=%d, state=%d)\n", p->pid, p->level, p->priority, p->state);
 
 }
 
@@ -98,7 +98,7 @@ mlfq_enqueue(struct proc *p)
 
   release(&mlfq_queue_lock);
 
-  printf("Equeued PID %d (level=%d, priority=%d, state=%d)\n", p->pid, p->level, p->priority, p->state);
+  // printf("Equeued PID %d (level=%d, priority=%d, state=%d)\n", p->pid, p->level, p->priority, p->state);
 
 }
 
@@ -729,7 +729,7 @@ scheduler(void)
 
     p = dequeue();
     acquire(&p->lock);
-    printf("[scheduler] Dequeued PID %d (level=%d, priority=%d)\n", p->pid, p->level, p->priority);
+    // printf("[scheduler] Dequeued PID %d (level=%d, priority=%d)\n", p->pid, p->level, p->priority);
     p->state = RUNNING;
     c->proc = p;
     swtch(&c->context, &p->context);
