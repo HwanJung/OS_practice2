@@ -91,3 +91,39 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+uint64
+sys_yield(void)
+{
+  yield();
+  return 0;
+}
+
+uint64
+sys_setpriority(void)
+{
+  int pid;
+  int priority;
+  argint(0, &pid);
+  argint(1, &priority);
+
+  return setpriority(pid, priority);
+}
+
+uint64
+sys_getlev(void)
+{
+  return getlev();
+}
+
+uint64
+sys_mlfqmode(void)
+{
+  return mlfqmode();
+}
+
+uint64
+sys_fcfsmode(void)
+{
+  return fcfsmode();
+}

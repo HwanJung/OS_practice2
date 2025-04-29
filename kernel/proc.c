@@ -26,6 +26,266 @@ extern char trampoline[]; // trampoline.S
 // must be acquired before any p->lock.
 struct spinlock wait_lock;
 
+enum schedulermode schedmode;
+struct spinlock schedmode_lock;
+
+struct queue fcfs_queue;
+struct queue mlfq_queue[6]; // 0 : L0, 1 : L1, 2 ~ 5 : L2(priority 3 ~ 0)
+struct spinlock fcfs_queue_lock;
+struct spinlock mlfq_queue_lock;
+
+
+int tickcount = 0;
+struct spinlock tickcount_lock;
+
+void
+fcfs_init(void)
+{
+  initlock(&fcfs_queue_lock, "fcfs_queue_lock");
+  fcfs_queue.front = 0;
+  fcfs_queue.rear = -1;
+  fcfs_queue.size = 0;
+}
+
+void
+mlfq_init(void)
+{
+  initlock(&mlfq_queue_lock, "mlfq_queue_lock");
+  for(int i = 0; i < 6; i++) {
+    mlfq_queue[i].front = 0;
+    mlfq_queue[i].rear = -1;
+    mlfq_queue[i].size = 0;
+  }
+}
+
+void 
+fcfs_enqueue(struct proc *p)
+{
+  acquire(&fcfs_queue_lock);
+  if(fcfs_queue.size == NPROC) {
+    release(&fcfs_queue_lock);
+    panic("FCFS queue is full");
+  }
+  fcfs_queue.rear = (fcfs_queue.rear + 1) % NPROC;
+  fcfs_queue.proc[fcfs_queue.rear] = p;
+  fcfs_queue.size++;
+  release(&fcfs_queue_lock);
+
+  printf("Equeued PID %d (level=%d, priority=%d, state=%d)\n", p->pid, p->level, p->priority, p->state);
+
+}
+
+// Before call mlfq_enqueue, p lock need
+void
+mlfq_enqueue(struct proc *p)
+{
+  int queueidx = p->level;
+
+  if(p->priority < 3) {
+    queueidx = 5 - p->priority; // idx will be 3 ~ 5
+  }
+
+  acquire(&mlfq_queue_lock);
+
+  if(mlfq_queue[queueidx].size == NPROC) {
+    release(&mlfq_queue_lock);
+    panic("MLFQ queue is full");
+  }
+
+  mlfq_queue[queueidx].rear = (mlfq_queue[queueidx].rear + 1) % NPROC;
+  mlfq_queue[queueidx].proc[mlfq_queue[queueidx].rear] = p;
+  mlfq_queue[queueidx].size++;
+
+  release(&mlfq_queue_lock);
+
+  printf("Equeued PID %d (level=%d, priority=%d, state=%d)\n", p->pid, p->level, p->priority, p->state);
+
+}
+
+struct proc*
+fcfs_dequeue(void)
+{
+  acquire(&fcfs_queue_lock);
+
+  if(fcfs_queue.size == 0) {
+    release(&fcfs_queue_lock);
+    panic("FCFS queue is empty");
+  }
+
+  struct proc *p = fcfs_queue.proc[fcfs_queue.front];
+  fcfs_queue.front = (fcfs_queue.front + 1) % NPROC;
+  fcfs_queue.size--;
+  release(&fcfs_queue_lock);
+
+  return p;
+}
+
+struct proc*
+mlfq_dequeue(void)
+{
+  for(int i = 0; i < 6; i++) {
+    acquire(&mlfq_queue_lock);
+
+    if(mlfq_queue[i].size > 0) {
+      struct proc *p = mlfq_queue[i].proc[mlfq_queue[i].front];
+      mlfq_queue[i].front = (mlfq_queue[i].front + 1) % NPROC;
+      mlfq_queue[i].size--;
+
+      release(&mlfq_queue_lock);
+
+      return p;
+    }
+    release(&mlfq_queue_lock);
+  }
+
+  panic("MLFQ queue is empty");
+}
+
+void 
+enqueue(struct proc *p)
+{
+  acquire(&schedmode_lock);
+  enum schedulermode mode = schedmode;
+  release(&schedmode_lock);
+
+  if(mode == FCFS) {
+    p->level = -1;
+    p->priority = -1;
+    p->timequantum = -1;
+    fcfs_enqueue(p);
+  } else if(mode == MLFQ) {
+    p->level = 0;
+    p->priority = 3;
+    p->timequantum = 2 * p->level + 1;
+    mlfq_enqueue(p);
+  } else {
+    panic("Unknown scheduling mode");
+  } 
+}
+
+struct proc*
+dequeue(void)
+{
+  acquire(&schedmode_lock);
+  enum schedulermode mode = schedmode;
+  release(&schedmode_lock);
+
+  if(mode == FCFS) {
+    return fcfs_dequeue();
+  } else if(mode == MLFQ) {
+    return mlfq_dequeue();
+  } else {
+    panic("Unknown scheduling mode");
+  }
+}
+
+int isEmptyfcfsQueue()
+{
+  acquire(&fcfs_queue_lock);
+  int empty = fcfs_queue.size == 0;
+  release(&fcfs_queue_lock);
+  return empty;
+}
+
+int isEmptymlfqQueue()
+{
+  int empty = 1;
+
+  acquire(&mlfq_queue_lock);
+  for(int i = 0; i < 6; i++) {
+    if(mlfq_queue[i].size > 0) {
+      empty = 0;
+      break;
+    }
+  }
+  release(&mlfq_queue_lock);
+
+  return empty;
+}
+
+int
+isEmptyQueue()
+{
+  acquire(&schedmode_lock);
+  enum schedulermode mode = schedmode;
+  release(&schedmode_lock);
+
+  int empty = 0;
+
+  if(mode == FCFS) {
+    empty = isEmptyfcfsQueue();
+  } else if(mode == MLFQ) {
+    empty = isEmptymlfqQueue();
+  }
+
+  return empty;
+}
+
+void priorityboost(){
+  struct proc *p;
+
+  for(p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+    if(!(p->state == UNUSED && p->state == ZOMBIE)) {
+      p->level = 0;
+      p->priority = 3;
+      p->timequantum = 2 * p->level + 1;
+
+    }
+    release(&p->lock);
+  }
+
+  for(int i = 1; i < 6; i++){
+    while(mlfq_queue[i].size != 0){
+      enqueue(mlfq_queue[i].proc[mlfq_queue[i].front]);
+      mlfq_queue[i].front = (mlfq_queue[i].front + 1) % NPROC;
+      mlfq_queue[i].size--;
+    }
+  }
+}
+
+void
+receiveTimerIntr(void)
+{
+  acquire(&schedmode_lock);
+  enum schedulermode mode = schedmode;
+  release(&schedmode_lock);
+
+  if(mode == MLFQ) {
+    acquire(&tickcount_lock);
+    tickcount++;
+    if(tickcount == 50){
+      tickcount = 0;
+      release(&tickcount_lock);
+      priorityboost();
+      return;
+    }
+    release(&tickcount_lock);
+
+    struct proc *p = myproc();
+
+    acquire(&p->lock);
+    p->timequantum--;
+
+    if(p->timequantum == 0) {
+      if(p->level < 2) {
+        p->level++;
+      } else {
+        p->priority = (p->priority == 0) ? 0 : p->priority - 1;
+      }
+      p->timequantum = 2 * p->level + 1;
+      
+      release(&p->lock);
+
+      yield();
+    } else {
+      release(&p->lock);
+    }
+  }
+}
+
+
+
 // Allocate a page for each process's kernel stack.
 // Map it high in memory, followed by an invalid
 // guard page.
@@ -56,6 +316,10 @@ procinit(void)
       p->state = UNUSED;
       p->kstack = KSTACK((int) (p - proc));
   }
+
+  schedmode = FCFS;
+  fcfs_init();
+  mlfq_init();
 }
 
 // Must be called with interrupts disabled,
@@ -124,6 +388,7 @@ allocproc(void)
 found:
   p->pid = allocpid();
   p->state = USED;
+  p->creationtime = ticks;
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -251,6 +516,8 @@ userinit(void)
 
   p->state = RUNNABLE;
 
+  enqueue(p);
+
   release(&p->lock);
 }
 
@@ -320,6 +587,7 @@ fork(void)
 
   acquire(&np->lock);
   np->state = RUNNABLE;
+  enqueue(np);
   release(&np->lock);
 
   return pid;
@@ -446,37 +714,28 @@ scheduler(void)
 {
   struct proc *p;
   struct cpu *c = mycpu();
-
+  
   c->proc = 0;
   for(;;){
     // The most recent process to run may have had interrupts
     // turned off; enable them to avoid a deadlock if all
     // processes are waiting.
     intr_on();
-
-    int found = 0;
-    for(p = proc; p < &proc[NPROC]; p++) {
-      acquire(&p->lock);
-      if(p->state == RUNNABLE) {
-        // Switch to chosen process.  It is the process's job
-        // to release its lock and then reacquire it
-        // before jumping back to us.
-        p->state = RUNNING;
-        c->proc = p;
-        swtch(&c->context, &p->context);
-
-        // Process is done running for now.
-        // It should have changed its p->state before coming back.
-        c->proc = 0;
-        found = 1;
-      }
-      release(&p->lock);
-    }
-    if(found == 0) {
-      // nothing to run; stop running on this core until an interrupt.
-      intr_on();
+    
+    if(isEmptyQueue()){
       asm volatile("wfi");
+      continue;
     }
+
+    p = dequeue();
+    acquire(&p->lock);
+    printf("[scheduler] Dequeued PID %d (level=%d, priority=%d)\n", p->pid, p->level, p->priority);
+    p->state = RUNNING;
+    c->proc = p;
+    swtch(&c->context, &p->context);
+
+    c->proc = 0;
+    release(&p->lock);
   }
 }
 
@@ -512,8 +771,20 @@ void
 yield(void)
 {
   struct proc *p = myproc();
+
+  acquire(&schedmode_lock);
+  int mode = schedmode;
+  release(&schedmode_lock);
+
   acquire(&p->lock);
   p->state = RUNNABLE;
+  if(mode == FCFS){
+    //printf("yield process %d, level : %d, priority : %d\n", p->pid, p->level, p->priority);
+    
+    fcfs_enqueue(p);
+  } else if(schedmode == MLFQ){
+    mlfq_enqueue(p);
+  }
   sched();
   release(&p->lock);
 }
@@ -585,6 +856,7 @@ wakeup(void *chan)
       acquire(&p->lock);
       if(p->state == SLEEPING && p->chan == chan) {
         p->state = RUNNABLE;
+        enqueue(p);
       }
       release(&p->lock);
     }
@@ -606,6 +878,7 @@ kill(int pid)
       if(p->state == SLEEPING){
         // Wake process from sleep().
         p->state = RUNNABLE;
+        enqueue(p);
       }
       release(&p->lock);
       return 0;
@@ -692,4 +965,176 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+// check whether a process with the pid exists
+struct proc*
+getprocess(int pid)
+{
+  struct proc *p;
+
+  for(p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+    if(p->pid == pid) {
+      release(&p->lock);
+      return p;
+    }
+    release(&p->lock);
+  }
+
+  return 0;
+}
+
+// set priority of process with the pid
+int setpriority(int pid, int priority)
+{
+  struct proc *p = getprocess(pid);
+  
+  if(p == 0) {
+    return -1;
+  }
+
+  if(priority < 0 || priority > 3) {
+    return -2;
+  }
+
+  acquire(&p->lock);
+  p->priority = priority;
+  // printf("pid : %d, priority : %d\n", pid, p->priority);
+  release(&p->lock);
+
+  return 0;
+}
+
+int
+getlev(void)
+{
+  if(schedmode == FCFS) {
+    return 99;
+  } else {
+    struct proc *p = myproc();
+
+    acquire(&p->lock);
+    int level = p->level;
+    release(&p->lock);
+
+    return level;
+  }
+}
+
+int mlfqmode(void)
+{
+  acquire(&schedmode_lock);
+
+  if(schedmode == MLFQ) {
+    printf("Scheduling mode is already MLFQ\n");
+    release(&schedmode_lock);
+    return -1;
+  }
+
+  schedmode = MLFQ;
+  release(&schedmode_lock);
+
+  acquire(&tickcount_lock);
+  tickcount = 0;
+  release(&tickcount_lock);
+
+  struct proc *p;
+
+  for(p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+    if(!(p->state == UNUSED && p->state == ZOMBIE)) {
+      p->level = 0;
+      p->priority = 3;
+      p->timequantum = 2 * p->level + 1;
+    }
+    release(&p->lock);
+  }
+
+  while(!isEmptyfcfsQueue()) {
+    struct proc *p = fcfs_dequeue();
+    acquire(&p->lock);
+    mlfq_enqueue(p);
+    release(&p->lock);
+  }
+
+  return 0;
+}
+
+int fcfsmode(void)
+{
+  acquire(&schedmode_lock);
+
+  if(schedmode == FCFS) {
+    printf("Scheduling mode is already FCFS\n");
+    release(&schedmode_lock);
+    return -1;
+  }
+
+  schedmode = FCFS;
+  release(&schedmode_lock);
+
+  struct proc *dequeuedProc[NPROC];
+  int procCnt = 0;
+
+  while(!isEmptymlfqQueue()) {
+    dequeuedProc[procCnt++] = mlfq_dequeue();
+  }
+
+  struct proc *p;
+
+  for(p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+    if(!(p->state == UNUSED && p->state == ZOMBIE)) {
+      p->level = -1;
+      p->priority = -1;
+      p->timequantum = -1;
+    }
+    release(&p->lock);
+  }
+
+  int isEnqueued[NPROC] = {0};
+
+  while(1) {
+    struct proc *earlyP;
+    int findEarlyP = 0;
+    int earlyPCreationTime = 0;
+    int earlyPIdx = -1;
+
+    for(int i = 0; i < procCnt; i++) {
+      p = dequeuedProc[i];
+
+      if(isEnqueued[i] == 1) {
+        continue;
+      }
+
+      acquire(&p->lock);
+      int creationTime = p->creationtime;
+      release(&p->lock);
+
+      if(findEarlyP == 0) {
+        earlyP = p;
+        earlyPIdx = i;
+        earlyPCreationTime = creationTime;
+        findEarlyP = 1;
+      } else {
+        if(creationTime < earlyPCreationTime) {
+          earlyP = p;
+          earlyPIdx = i;
+          earlyPCreationTime = creationTime;
+        }
+      }
+    }
+
+    if(findEarlyP) {
+      isEnqueued[earlyPIdx] = 1;
+      acquire(&earlyP->lock);
+      fcfs_enqueue(earlyP);
+      release(&earlyP->lock);
+    } else {
+      break;
+    }
+  }
+
+  return 0;
 }
