@@ -170,10 +170,20 @@ dequeue(void)
   enum schedulermode mode = schedmode;
   release(&schedmode_lock);
 
+  struct proc *p;
+
   if(mode == FCFS) {
-    return fcfs_dequeue();
+    do {
+      p = fcfs_dequeue();
+    } while(p->state != RUNNABLE);
+
+    return p;
   } else if(mode == MLFQ) {
-    return mlfq_dequeue();
+    do {
+      p = mlfq_dequeue();
+    } while(p->state != RUNNABLE);
+
+    return p;
   } else {
     panic("Unknown scheduling mode");
   }
@@ -1000,8 +1010,9 @@ int setpriority(int pid, int priority)
 
   acquire(&p->lock);
   p->priority = priority;
-  // printf("pid : %d, priority : %d\n", pid, p->priority);
   release(&p->lock);
+
+  yield();
 
   return 0;
 }
